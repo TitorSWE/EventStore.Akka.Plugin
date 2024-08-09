@@ -1,72 +1,103 @@
 package ch.elca.advisory
 package plugin.snapshot
 
-import akka.actor.ActorSystem
-import akka.actor.Status.Success
+
 import akka.persistence.{SelectedSnapshot, SnapshotMetadata, SnapshotSelectionCriteria}
 import akka.persistence.snapshot.SnapshotStore
-import ch.elca.advisory.plugin.Helper.getClassTag
 import ch.elca.advisory.plugin.{EventStorePlugin, EventStoreSerialization}
-import com.eventstore.dbclient.{EventData, StreamMetadata}
-import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.module.scala.DefaultScalaModule
+
 
 import scala.jdk.CollectionConverters.*
 import scala.jdk.FutureConverters.*
 import scala.concurrent.{ExecutionContext, Future}
-import scala.reflect.ClassTag
 import scala.util.Try
 
 /*
-* The snapshots will be stored in the metadata of the stream
-* */
+* In this implementation, snapshots of a certain persistenceId are stored inside its stream metadata
+* Custom properties is then used as a dictionary of snapshots
+* The key corresponds to the snapshot metadata (sequenceNr and timestamp)
+* The value is the snapshot payload
+*
+* Maybe this implementation will change, snapshots could eventually be stored inside a stream of event
+* which will allow the user to choose a different serialization technic than json serialization(Jackson json here)
+*
+* However this method allow an easy way to get snapshots according to timestamp criteria
+*  */
 
-class EventStoreSnapshot extends SnapshotStore with EventStorePlugin{
 
 
-  private def getSnapshots(customProperties: Map[String, AnyRef]): Map[SnapshotMetadata, String] = {
-    val snapshots: Map[String, String] = customProperties.get("snapshots") match {
-      case Some(value) => serialization.snapshotstoMap(value)
-      case None => Map.empty[String, String]
-    }
+class EventStoreSnapshot extends SnapshotStore with EventStorePlugin {
+
+
+  /*
+  * Snapshots are stored in a dictionary where the key is the snapshot metadata
+  * Deserialize the keys of this dictionary, ease the filtering over sequenceNr or timestamp
+  * */
+  private def getDeserializedSnapshotsMetadata(snapshots: Map[String, AnyRef]): Map[SnapshotMetadata, String] = {
     snapshots.map {case (key, value) =>
-      (serialization.deserializeSnapshotMetadata(key), value)
+      (serialization.deserializeSnapshotMetadata(key), value.toString)
     }
   }
 
+  /*
+  * Returns the snapshots filtered according to the most restrictive criteria between sequenceNr and timestamp
+  * Meaning snapshots are filtered according to sequenceNr criteria and timestamp criteria separately
+  * Then computes the intersection of both filtered snapshots
+  */
+  private def filterSnapshots(snapshots: Map[SnapshotMetadata, String], criteria: SnapshotSelectionCriteria): Map[SnapshotMetadata, String] = {
 
-  private def filterSnapshots(properties: Map[SnapshotMetadata, String], criteria: SnapshotSelectionCriteria): Map[SnapshotMetadata, String] = {
-    properties.filter { case (metadata, snapshot) =>
-      (criteria.minSequenceNr <= metadata.sequenceNr && metadata.sequenceNr <= criteria.maxSequenceNr) ||
-        (criteria.minTimestamp <= metadata.timestamp && metadata.timestamp <= criteria.maxTimestamp)
-    }
-  }
+    val snapshotsFilteredBySeq = snapshots.filter { case (metadata, snapshot) =>
+      (criteria.minSequenceNr <= metadata.sequenceNr && metadata.sequenceNr <= criteria.maxSequenceNr) }
 
+    val snapshotsFilteredByTime = snapshots.filter { case (metadata, snapshot) =>
+      (criteria.minTimestamp <= metadata.timestamp && metadata.timestamp <= criteria.maxTimestamp)}
 
-  // criteria according timestamp is not implemented for the moment because snapshot are in metadata
-  override def loadAsync(persistenceId: String, criteria: SnapshotSelectionCriteria): Future[Option[SelectedSnapshot]] = {
+    val intersection = snapshotsFilteredBySeq.filter { case (k, v) => snapshotsFilteredByTime.get(k).contains(v) }
 
-    def selectMostRecentSnapshot(selectedSnapshots: Map[SnapshotMetadata, String])(implicit tag: ClassTag[_]): Option[SelectedSnapshot] = {
-      selectedSnapshots.keys.maxByOption(_.sequenceNr).map { key =>
-        SelectedSnapshot(key, serialization.deserializeSnapshot(selectedSnapshots(key)))
-      }
-    }
-
-    client.getStreamMetadata(persistenceId).asScala.map { streamMetadata =>
-      val properties = streamMetadata.getCustomProperties.asScala.toMap
-      val snapshots = getSnapshots(properties)
-      val tag = getClassTag(properties("type").toString).get
-      val selectedSnapshots = filterSnapshots(snapshots, criteria)
-      selectMostRecentSnapshot(selectedSnapshots)(tag)
-    }.recover { case _ => None }
-
+    intersection
   }
 
 
   /*
-  *
-  * TO DO : Custom Properties is json containing type and snapshots properties which is a map[String, String]
-  * */
+  * Implementation of the SnapshotStore API
+  * Since snapshots are not stored in event stream, the idea is always the same for Write or Update
+  * 1. Retry the snapshots from the customProperties of the metadata stream
+  * 2. Modify these custom properties (add or delete a snapshot)
+  * 3. Update the stream metadata containing new properties (snapshots) in EventStore
+  */
+
+
+  override def loadAsync(persistenceId: String, criteria: SnapshotSelectionCriteria): Future[Option[SelectedSnapshot]] = {
+
+    /*
+    * Select most recent snapshot json
+    * Then deserializes it
+    * */
+    def selectMostRecentSnapshot(selectedSnapshots: Map[SnapshotMetadata, AnyRef]): Option[SelectedSnapshot] = {
+      // Find the most recent snapshot metadata
+      val mostRecentMetadata: Option[SnapshotMetadata] = selectedSnapshots.keys.maxByOption(_.timestamp)
+
+      mostRecentMetadata.flatMap { metadata =>
+        // Retrieve the snapshot data
+        val snapshotData = selectedSnapshots(metadata)
+
+        // Wrap the deserialization in Try
+        val deserializedSnapshotTry: Try[AnyRef] = Try (serialization.deserializeSnapshot(snapshotData.toString))
+
+        // Convert Try to Option based on success or failure
+        deserializedSnapshotTry.toOption.map(deserializedSnapshot => SelectedSnapshot(metadata, deserializedSnapshot))
+      }
+    }
+
+    client.getStreamMetadata(persistenceId).asScala.map { streamMetadata =>
+      val snapshots = streamMetadata.getCustomProperties.asScala.toMap
+      val selectedSnapshots = filterSnapshots(getDeserializedSnapshotsMetadata(snapshots), criteria)
+      val mostRecent = selectMostRecentSnapshot(selectedSnapshots)
+      mostRecent
+    }.recover { case _ => None }
+
+  }
+
 
   override def saveAsync(metadata: SnapshotMetadata, snapshot: Any): Future[Unit] = {
 
@@ -76,41 +107,30 @@ class EventStoreSnapshot extends SnapshotStore with EventStorePlugin{
       case snap: AnyVal => snap.toString
     }
     client.getStreamMetadata(metadata.persistenceId).asScala.flatMap { streamMetadata =>
-      val customProperties = Option(streamMetadata.getCustomProperties.asScala).getOrElse(Map.empty[String, AnyRef])
-      val snapshots: Map[String, String] = customProperties.get("snapshots") match {
-        case Some(value) => serialization.snapshotstoMap(value)
-        case None => Map.empty[String, String]
-      }
+      val snapshots = Option(streamMetadata.getCustomProperties.asScala).getOrElse(Map.empty[String, AnyRef])
       val updatedSnapshots = snapshots + (serializedSnapshotMetadata -> serializedSnapshot)
-      val classStateName = customProperties.getOrElse("type", snapshot.getClass.getName)
-      val updatedProperties = updatedSnapshots + ("type" -> classStateName)
-      streamMetadata.setCustomProperties(updatedProperties.asJava)
+      streamMetadata.setCustomProperties(updatedSnapshots.asJava)
       client.setStreamMetadata(metadata.persistenceId, streamMetadata).asScala.map( _ => ())}
 
   }
 
   override def deleteAsync(metadata: SnapshotMetadata): Future[Unit] = {
+
     val persistenceId = metadata.persistenceId
     client.getStreamMetadata(metadata.persistenceId).asScala.flatMap { streamMetadata =>
-      val customProperties = Option(streamMetadata.getCustomProperties.asScala).getOrElse(Map.empty[String, AnyRef])
-      val snapshots: Map[String, String] = customProperties.get("snapshots") match {
-        case Some(value) => serialization.snapshotstoMap(value)
-        case None => Map.empty[String, String]
-      }
+      val snapshots = Option(streamMetadata.getCustomProperties.asScala).getOrElse(Map.empty[String, AnyRef])
       val updatedSnapshots = snapshots - serialization.serializeSnapshotMetadata(metadata) // Deleting snapshot
-      val updatedProperties = updatedSnapshots + ("type" -> customProperties("type"))
-      streamMetadata.setCustomProperties(updatedProperties.asJava)
+      streamMetadata.setCustomProperties(updatedSnapshots.asJava)
       client.setStreamMetadata(metadata.persistenceId, streamMetadata).asScala.map( _ => ())}
   }
 
   override def deleteAsync(persistenceId: String, criteria: SnapshotSelectionCriteria): Future[Unit] = {
     client.getStreamMetadata(persistenceId).asScala.flatMap { streamMetadata =>
-      val customProperties = streamMetadata.getCustomProperties.asScala.toMap
-      val snapshots = getSnapshots(customProperties)
-      val snapshotsToDelete = filterSnapshots(snapshots, criteria)
-      val updatedSnapshots = (snapshots -- snapshotsToDelete.keys).map { case (key, value) => (serialization.serializeSnapshotMetadata(key), value)} // Deleting snapshot
-      val updatedProperties = updatedSnapshots + ("type" -> customProperties("type"))
-      streamMetadata.setCustomProperties(updatedProperties.asJava)
+      val snapshots = Option(streamMetadata.getCustomProperties.asScala).getOrElse(Map.empty[String, AnyRef]).toMap
+      val deserializedSnapshots = getDeserializedSnapshotsMetadata(snapshots)
+      val snapshotsToDelete = filterSnapshots(deserializedSnapshots, criteria)
+      val updatedSnapshots = (deserializedSnapshots -- snapshotsToDelete.keys).map { case (key, value) => (serialization.serializeSnapshotMetadata(key), value)} // Deleting snapshot
+      streamMetadata.setCustomProperties(updatedSnapshots.asJava)
       client.setStreamMetadata(persistenceId, streamMetadata).asScala.map( _ => ())
     }
   }

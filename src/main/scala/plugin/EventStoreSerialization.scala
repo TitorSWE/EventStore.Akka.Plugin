@@ -4,9 +4,11 @@ package plugin
 import akka.actor.ActorSystem
 import akka.persistence.SnapshotMetadata
 import akka.persistence.query.EventEnvelope
+import akka.serialization.jackson.JsonSerializable
 import akka.serialization.{Serialization, SerializationExtension, Serializer}
+import ch.elca.advisory.plugin.Helper.getClassTag
 import ch.elca.advisory.plugin.journal.EventStoreJournalSerializer
-import ch.elca.advisory.plugin.snapshot.EventStoreSnapshotSerializer
+import ch.elca.advisory.plugin.snapshot.{EventStoreSnapshotSerializer, EventStoreSnapshotWrapper}
 import ch.qos.logback.core.spi.ConfigurationEvent.EventType
 import com.eventstore.dbclient.{EventData, RecordedEvent, ResolvedEvent}
 import com.fasterxml.jackson.core.`type`.TypeReference
@@ -42,46 +44,50 @@ case class EventStoreSerialization(serialization: Serialization) {
   }
 
 
+ /*
+ * Serialization for snapshots
+ * The serialization is made with Jackson Json to satisfy the API of customProperties in eventstore stream metadata
+ * TO DO : generalize the json serialization in order to use other json serializer
+ * */
+
   /*
-  * Serialization for snapshot
+  * Small Wrapper in order to keep the runtime class of the snapshot inside the json for deserializing the snapshot payload
   * */
-  case class WrappedSnapshot(typeName: String, payload: Any)
+  private class snapWrapper(val payload: AnyRef, val className: String) extends JsonSerializable
 
-  private object WrappedSnapshot {
-    def apply(payload: Any): WrappedSnapshot = {
-      val clazz = payload.getClass.getName
-      WrappedSnapshot(clazz, payload)
-    }
+  private object snapWrapper {
+    def apply(payload:AnyRef): snapWrapper = new snapWrapper(payload, payload.getClass.getName)
+  }
+  
+  
+  /* Transform the snapshot json string into a json object which can be manipulate
+  * Retry the runtime class 
+  * Return the deserialized snapshot payload
+  * */
+  def deserializeSnapshot(snapshot: String): AnyRef = {
+    val mapper = new ObjectMapper().registerModule(DefaultScalaModule)
+    val snapshotJson = mapper.readTree(snapshot)
+    val payload = snapshotJson.get("payload")
+    val className = snapshotJson.get("className").asText()
+    val runTimeClass = Class.forName(className)
+    mapper.treeToValue(payload, runTimeClass)
   }
 
-  val mapper: ObjectMapper = new ObjectMapper()
-  mapper.registerModule(DefaultScalaModule)
-
-  def snapshotstoMap(snapshots: AnyRef): Map[String, String] = {
-    mapper.convertValue(snapshots, new TypeReference[Map[String, String]]() {})
-  }
-
-
-  def deserializeSnapshot[T](snap: String)(implicit tag: ClassTag[T]): T = {
-
-    val ser = serialization.findSerializerFor(tag.runtimeClass)
-    val res = ser match {
-      case ser: EventStoreSnapshotSerializer => ser.fromSnapshot(snap, tag.runtimeClass)
-      case _ => mapper.readValue(snap, tag.runtimeClass)
-    }
-    res.asInstanceOf[T]
-  }
-
+  /*
+  * Wrap the snapshot payload, then serializing into a json string
+  * */
   def serializeSnapshot(data: AnyRef, eventType: => Option[Any] = None): String = {
-    // convert snapshot into JSON-like string
-    mapper.writeValueAsString(data)
+    val mapper = new ObjectMapper().registerModule(DefaultScalaModule)
+    mapper.writeValueAsString(snapWrapper(data))
   }
-
+  
   def deserializeSnapshotMetadata(metadata: String): SnapshotMetadata = {
+    val mapper = new ObjectMapper().registerModule(DefaultScalaModule)
     mapper.readValue(metadata, classOf[SnapshotMetadata])
   }
 
   def serializeSnapshotMetadata(metaData: SnapshotMetadata): String = {
+    val mapper = new ObjectMapper().registerModule(DefaultScalaModule)
     mapper.writeValueAsString(metaData)
   }
 }

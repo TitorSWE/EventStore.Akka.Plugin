@@ -35,14 +35,5 @@ class InvalidPersistenceIdSpec extends BasePersistenceSpec {
       probe.expectTerminated(persistent, 10.seconds)
     }
   }
-  
-  "The Supervisor A Persistent Actor with a non UUID persistenceId " should {
-    "receive a signal when the child wants to persist an event" in {
-      val probe = testKit.createTestProbe()
-    }
-  }
-  
-  // The state should not be updated
-  // When restarting, the state should not be updated
 }
 

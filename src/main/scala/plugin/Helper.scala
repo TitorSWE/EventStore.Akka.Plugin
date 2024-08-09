@@ -1,6 +1,8 @@
 package ch.elca.advisory
 package plugin
 
+import ch.elca.advisory.plugin.snapshot.EventStoreSnapshotWrapper
+
 import java.util.regex.Pattern
 import scala.reflect.ClassTag
 import scala.util.{Failure, Success, Try}
@@ -21,6 +23,8 @@ object Helper {
       case Failure(_) => None
     }
   }
+
+  def getClassTagForWrapper[S](implicit ct: ClassTag[EventStoreSnapshotWrapper[S]]): ClassTag[EventStoreSnapshotWrapper[S]] = ct
 
   def sequence[T](seq: Seq[Try[T]]): Try[Seq[T]] = {
     seq.foldRight(Try(Seq.empty[T])) { (tryElement, trySeq) =>

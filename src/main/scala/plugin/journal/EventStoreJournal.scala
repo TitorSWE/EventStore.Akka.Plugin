@@ -42,7 +42,7 @@ class EventStoreJournal extends AsyncWriteJournal with EventStoreJournalPlugin {
       // Implement the logic to check if the payload is correctly wrapped
       // This is a placeholder for the actual check you need
       payload match {
-        case _: EventStoreWrapper[Any] => true // Example: replace with actual check for WrappedEvent
+        case _: EventStoreJournalWrapper[Any] => true // Example: replace with actual check for WrappedEvent
         case _ => false
       }
     }
@@ -62,10 +62,10 @@ class EventStoreJournal extends AsyncWriteJournal with EventStoreJournalPlugin {
         }
         serializedBatch <- sequence(atomicWrite.payload.map { persistentRepr =>
           Try(persistentRepr.payload match {
-            case event: EventStoreWrapper[_] => serialization.serialize(event, None)
+            case event: EventStoreJournalWrapper[_] => serialization.serialize(event, None)
             case _ => {
               context.system.log.error("Event must be wrapped into EventStoreWrapper, must use EventStoreAdapter")
-              throw new Exception("Event must be wrapped into EventStoreWrapper")
+              throw new Exception("Event must be wrapped into EventStoreWrapper object, use the EventStoreAdapter to wrap the events")
             }
           })
         })
@@ -110,15 +110,16 @@ class EventStoreJournal extends AsyncWriteJournal with EventStoreJournalPlugin {
         val payload = serialization.deserialize(recordedEvent)(runTimeEventClassTag)
 
         // Constructing persistentRepr
-        PersistentRepr(
+        val persistentrepr = PersistentRepr(
           payload = payload,
-          sequenceNr = recordedEvent.getPosition.getCommitUnsigned + 1,
+          sequenceNr = recordedEvent.getRevision + 1,
           persistenceId = persistenceId,
           manifest = "",
           deleted = false,
           sender = null,
           writerUuid = ""
         )
+        persistentrepr
       }).foreach(recoveryCallback)) // apply recoveryCallBack
     futureEventList
   }

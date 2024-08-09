@@ -7,7 +7,7 @@ package plugin.journal
 * */
 
 
-abstract class EventStoreWrapper[E] {
+abstract class EventStoreJournalWrapper[E] {
 
   val payload: E
   val tags: Set[String]
