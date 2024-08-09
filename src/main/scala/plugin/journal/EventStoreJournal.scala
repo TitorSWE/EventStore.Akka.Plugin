@@ -1,20 +1,17 @@
 package ch.elca.advisory
 package plugin.journal
 
-import akka.actor.{ActorSystem, Props}
 import akka.persistence.{AtomicWrite, PersistentRepr}
 import akka.persistence.journal.AsyncWriteJournal
-import ch.elca.advisory.plugin.Helper.sequence
-import ch.elca.advisory.plugin.{EventStorePlugin, EventStoreSerialization}
-import com.eventstore.dbclient.{CreateProjectionOptions, EventData, EventStoreDBProjectionManagementClient, ReadStreamOptions, RecordedEvent, StreamMetadata, WriteResult}
 
-import java.io.{ByteArrayOutputStream, ObjectOutputStream}
-import scala.concurrent.{ExecutionContext, Future}
+import ch.elca.advisory.plugin.Helper.sequence
+
+import com.eventstore.dbclient.{EventData, ReadStreamOptions, RecordedEvent, StreamMetadata}
+
+import scala.concurrent.Future
 import scala.util.{Failure, Success, Try}
 import scala.jdk.CollectionConverters.*
 import scala.jdk.FutureConverters.*
-import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.module.scala.DefaultScalaModule
 
 import java.util.UUID
 import scala.reflect.ClassTag
@@ -25,8 +22,9 @@ class EventStoreJournal extends AsyncWriteJournal with EventStoreJournalPlugin {
 
   
   /*
-  * 
-  * 
+  * Implementation of AsyncWriteJournal API
+  * When deploying EventStoreDB, projections must be disabled
+  * Before starting the actor, creating and enabling the projections (Required for Query journal): tag-projection and stream projection
   * */
 
   override def asyncWriteMessages(messages: Seq[AtomicWrite]): Future[Seq[Try[Unit]]] = {

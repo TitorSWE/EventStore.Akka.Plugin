@@ -4,12 +4,13 @@ package plugin.snapshot
 
 import akka.persistence.{SelectedSnapshot, SnapshotMetadata, SnapshotSelectionCriteria}
 import akka.persistence.snapshot.SnapshotStore
+import ch.elca.advisory.plugin.Helper.getClassTag
 import ch.elca.advisory.plugin.{EventStorePlugin, EventStoreSerialization}
-
 
 import scala.jdk.CollectionConverters.*
 import scala.jdk.FutureConverters.*
 import scala.concurrent.{ExecutionContext, Future}
+import scala.reflect.ClassTag
 import scala.util.Try
 
 /*
@@ -36,6 +37,12 @@ class EventStoreSnapshot extends SnapshotStore with EventStorePlugin {
   private def getDeserializedSnapshotsMetadata(snapshots: Map[String, AnyRef]): Map[SnapshotMetadata, String] = {
     snapshots.map {case (key, value) =>
       (serialization.deserializeSnapshotMetadata(key), value.toString)
+    }
+  }
+
+  private def getSerializedSnapshotsMetadata(snapshots: Map[SnapshotMetadata, String]): Map[String, String] = {
+    snapshots.map { case (key, value) =>
+      (serialization.serializeSnapshotMetadata(key), value)
     }
   }
 
@@ -81,8 +88,11 @@ class EventStoreSnapshot extends SnapshotStore with EventStorePlugin {
         // Retrieve the snapshot data
         val snapshotData = selectedSnapshots(metadata)
 
+        // Get the runtime class tag
+        val runtimeClass = Class.forName(metadata.metadata.get.toString)
+        val classTag = ClassTag[AnyRef](runtimeClass)
         // Wrap the deserialization in Try
-        val deserializedSnapshotTry: Try[AnyRef] = Try (serialization.deserializeSnapshot(snapshotData.toString))
+        val deserializedSnapshotTry: Try[AnyRef] = Try (serialization.deserializeSnapshot(snapshotData.toString)(classTag))
 
         // Convert Try to Option based on success or failure
         deserializedSnapshotTry.toOption.map(deserializedSnapshot => SelectedSnapshot(metadata, deserializedSnapshot))
@@ -101,7 +111,8 @@ class EventStoreSnapshot extends SnapshotStore with EventStorePlugin {
 
   override def saveAsync(metadata: SnapshotMetadata, snapshot: Any): Future[Unit] = {
 
-    val serializedSnapshotMetadata = serialization.serializeSnapshotMetadata(metadata)
+    // Manifest is in metadata of SnapshotMetadata, needed for deserializing
+    val serializedSnapshotMetadata = serialization.serializeSnapshotMetadata(metadata.withMetadata(snapshot.getClass.getName))
     val serializedSnapshot = snapshot match {
       case snap: AnyRef => serialization.serializeSnapshot(snap)
       case snap: AnyVal => snap.toString
@@ -114,12 +125,25 @@ class EventStoreSnapshot extends SnapshotStore with EventStorePlugin {
 
   }
 
+  // TO DO :
   override def deleteAsync(metadata: SnapshotMetadata): Future[Unit] = {
+
+    // Define a function to compare SnapshotMetadata objects for "almost equality"
+    def isAlmostEqual(metadata1: SnapshotMetadata, metadata2: SnapshotMetadata): Boolean = {
+      metadata1.persistenceId == metadata2.persistenceId &&
+        metadata1.sequenceNr == metadata2.sequenceNr &&
+        metadata1.timestamp == metadata2.timestamp
+    }
 
     val persistenceId = metadata.persistenceId
     client.getStreamMetadata(metadata.persistenceId).asScala.flatMap { streamMetadata =>
       val snapshots = Option(streamMetadata.getCustomProperties.asScala).getOrElse(Map.empty[String, AnyRef])
-      val updatedSnapshots = snapshots - serialization.serializeSnapshotMetadata(metadata) // Deleting snapshot
+      val deserializeSnapshots: Map[SnapshotMetadata, String] = getDeserializedSnapshotsMetadata(snapshots.toMap)
+      // Deleting the snapshots given a certain metadata
+      val filteredSnapshots: Map[SnapshotMetadata, String] = deserializeSnapshots.filterNot {
+        case (key, value) => isAlmostEqual(key, metadata)
+      }
+      val updatedSnapshots = getSerializedSnapshotsMetadata(filteredSnapshots)
       streamMetadata.setCustomProperties(updatedSnapshots.asJava)
       client.setStreamMetadata(metadata.persistenceId, streamMetadata).asScala.map( _ => ())}
   }

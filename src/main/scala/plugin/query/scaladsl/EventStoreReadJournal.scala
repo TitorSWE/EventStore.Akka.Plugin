@@ -2,7 +2,7 @@ package ch.elca.advisory
 package plugin.query.scaladsl
 
 import akka.NotUsed
-import akka.actor.{ActorSystem, ExtendedActorSystem}
+import akka.actor.ExtendedActorSystem
 import akka.persistence.query.{EventEnvelope, NoOffset, Offset, Sequence}
 import akka.persistence.query.scaladsl.ReadJournal
 import akka.stream.scaladsl.Source
@@ -10,14 +10,11 @@ import ch.elca.advisory.plugin.Helper.uuidPattern
 import ch.elca.advisory.plugin.{EventStorePlugin, EventStoreSerialization}
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.typesafe.config.Config
-import com.eventstore.dbclient.{EventData, EventStoreDBClient, EventStoreDBClientSettings, EventStoreDBConnectionString, ReadMessage, ReadStreamOptions, RecordedEvent, ResolvedEvent, StreamMetadata, WriteResult}
+import com.eventstore.dbclient.{ReadStreamOptions, ResolvedEvent}
 import com.fasterxml.jackson.module.scala.DefaultScalaModule
 
-import java.util.regex.Pattern
 import scala.concurrent.ExecutionContext
 import scala.jdk.CollectionConverters.*
-import scala.jdk.FutureConverters.*
-import scala.reflect.ClassTag
 
 class EventStoreReadJournal(system: ExtendedActorSystem, config: Config) extends ReadJournal
   with akka.persistence.query.scaladsl.EventsByTagQuery
@@ -107,6 +104,9 @@ class EventStoreReadJournal(system: ExtendedActorSystem, config: Config) extends
     Source(uuidStreams)
   }
 
+  /*
+  * Use jackson for deserializing the projected event into an EventEnvelope
+  * */
   private def getEventEnvelope(resolvedEvent: ResolvedEvent): EventEnvelope = {
     val event = resolvedEvent.getEvent.getEventData
     val jsonEvent = mapper.readTree(event)
@@ -122,9 +122,8 @@ class EventStoreReadJournal(system: ExtendedActorSystem, config: Config) extends
     val runTimeEventClass = Class.forName(eventType)
     val payload = mapper.treeToValue(eventNode, runTimeEventClass)
 
-    // TO DO : What is a position
     // Create an EventEnvelope
-    val offset = Offset.sequence(resolvedEvent.getEvent.getPosition.getCommitUnsigned) // Assuming this is the correct offset
+    val offset = Offset.sequence(resolvedEvent.getEvent.getRevision)
 
     // TO DO : Find a way to put timestamp in metadata
     EventEnvelope(offset, persistenceId, sequenceNr, payload, 0L)
